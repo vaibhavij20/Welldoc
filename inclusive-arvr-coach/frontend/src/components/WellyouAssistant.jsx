@@ -7,11 +7,19 @@ export default function WellyouAssistant(){
     { role: 'assistant', content: 'Hi! I\'m Wellyou. How can I help with your health today?' }
   ]);
 
-  const send = () => {
+  const send = async () => {
     if (!input.trim()) return;
-    const next = [...messages, { role: 'user', content: input.trim() }, { role: 'assistant', content: 'Thanks! I\'ll analyze that soon. (Demo response)' }];
-    setMessages(next);
+    const userText = input.trim();
+    setMessages(prev => [...prev, { role: 'user', content: userText }]);
     setInput('');
+    try {
+      const API_BASE = (import.meta && import.meta.env && import.meta.env.VITE_API_BASE) || 'http://localhost:4000';
+      const r = await fetch(`${API_BASE}/api/assistant/chat`, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ prompt: userText }) });
+      const data = await r.json();
+      setMessages(prev => [...prev, { role: 'assistant', content: data.text || 'No answer.' }]);
+    } catch (e) {
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I had trouble answering. Please try again.' }]);
+    }
   };
 
   return (

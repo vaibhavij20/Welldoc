@@ -21,6 +21,11 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(false);
   const [timeRange, setTimeRange] = useState('week'); // 'week' | 'month' | 'year'
   const location = useLocation();
+  const [fitStatus, setFitStatus] = useState({ connected: false, hasRefreshToken: false });
+  const [stepsSeries, setStepsSeries] = useState(null);
+  const [calSeries, setCalSeries] = useState(null);
+  const [hrSeries, setHrSeries] = useState(null);
+  const [sleepDonutLive, setSleepDonutLive] = useState(null);
   
   const user = getUser() || { email: 'anon' };
 
@@ -30,6 +35,8 @@ export default function Dashboard() {
     if (savedData) {
       setHealthData(JSON.parse(savedData));
     }
+    // Load Google Fit status on mount
+    fetch('/auth/google-fit/status').then(r=>r.json()).then(setFitStatus).catch(()=>{});
   }, []);
 
   const handleDataSubmit = (data) => {
@@ -117,6 +124,30 @@ export default function Dashboard() {
     const el = document.getElementById(hash);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [location.hash]);
+
+  // Helper: fetch all Google Fit datasets
+  function syncGoogleFit() {
+    if (!fitStatus.connected) return;
+    const tzOffsetMinutes = -new Date().getTimezoneOffset();
+    Promise.all([
+      fetch(`/api/fitness/steps?tzOffsetMinutes=${tzOffsetMinutes}`).then(r=>r.ok?r.json():Promise.reject()),
+      fetch('/api/fitness/calories').then(r=>r.ok?r.json():Promise.reject()),
+      fetch('/api/fitness/heartrate').then(r=>r.ok?r.json():Promise.reject()),
+      fetch('/api/fitness/sleep').then(r=>r.ok?r.json():Promise.reject())
+    ]).then(([steps, calories, hr, sleep]) => {
+      const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+      const stepsMapped = (steps.series||[]).map(p=>{ const d=new Date(p.start); return { day: days[d.getDay()], steps: p.steps }; });
+      setStepsSeries(stepsMapped);
+      const calMapped = (calories.series||[]).map(p=>{ const d=new Date(p.start); return { day: days[d.getDay()], intake: 0, burn: Math.round(p.calories) }; });
+      setCalSeries(calMapped);
+      const hrMapped = (hr.series||[]).map(p=>{ const d=new Date(p.start); return { day: days[d.getDay()], hr: Math.round(p.bpm) }; });
+      setHrSeries(hrMapped);
+      setSleepDonutLive(sleep.donut || null);
+    }).catch(()=>{});
+  }
+
+  // Fetch live Google Fit data when connected
+  useEffect(() => { syncGoogleFit(); }, [fitStatus.connected]);
 
   const QuickActionCard = ({ title, description, icon: Icon, onClick, color = '#3B82F6', gradient }) => (
     <div 
@@ -207,6 +238,16 @@ export default function Dashboard() {
             <Plus size={16} />
             Add Health Data
           </button>
+          {!fitStatus.connected ? (
+            <a href={`/auth/google-fit?token=${encodeURIComponent(localStorage.getItem('iac_token_v1')||'')}`} target="_blank" rel="noopener" className="btn secondary" style={{height:40, display:'inline-flex', alignItems:'center'}} onClick={(e)=>{
+              // Start polling immediately; OAuth will run in new tab
+              const timer = setInterval(()=>{
+                fetch('/auth/google-fit/status').then(r=>r.json()).then(s=>{ setFitStatus(s); if (s.connected) { clearInterval(timer); } }).catch(()=>{});
+              }, 1200);
+            }}>Connect Google Fit</a>
+          ) : (
+            <span style={{color:'#10b981',fontWeight:600}}>Google Fit Connected</span>
+          )}
           {healthData && (
             <button 
               className="btn secondary"
@@ -237,7 +278,7 @@ export default function Dashboard() {
                 <h4 style={{margin:'0 0 8px 0',color:'#1f2937'}}>Heart Rate Trend</h4>
                 <div style={{width:'100%',height:220}} aria-label="Heart rate line chart">
                   <ResponsiveContainer>
-                    <LineChart data={filterData(heartBmiData)}>
+                    <LineChart data={hrSeries || filterData(heartBmiData)}>
                       <CartesianGrid stroke="#f3f4f6" />
                       <XAxis dataKey="day" />
                       <YAxis />
@@ -253,7 +294,7 @@ export default function Dashboard() {
                 <h4 style={{margin:'0 0 8px 0',color:'#1f2937'}}>Steps per Day</h4>
                 <div style={{width:'100%',height:220}} aria-label="Daily steps bar chart">
                   <ResponsiveContainer>
-                    <BarChart data={filterData(activityData)}>
+                    <BarChart data={stepsSeries || filterData(activityData)}>
                       <CartesianGrid stroke="#f3f4f6" />
                       <XAxis dataKey="day" />
                       <YAxis />
@@ -270,8 +311,8 @@ export default function Dashboard() {
                 <div style={{width:'100%',height:220}} aria-label="Sleep stages distribution">
                   <ResponsiveContainer>
                     <PieChart>
-                      <Pie data={sleepDonut} dataKey="value" nameKey="name" innerRadius={55} outerRadius={75} paddingAngle={2}>
-                        {sleepDonut.map((entry, index) => (
+                      <Pie data={sleepDonutLive || sleepDonut} dataKey="value" nameKey="name" innerRadius={55} outerRadius={75} paddingAngle={2}>
+                        {(sleepDonutLive || sleepDonut).map((entry, index) => (
                           <Cell key={`cell-top-${index}`} fill={donutColors[index % donutColors.length]} />
                         ))}
                       </Pie>
@@ -286,7 +327,7 @@ export default function Dashboard() {
                 <h4 style={{margin:'0 0 8px 0',color:'#1f2937'}}>Calories Intake vs Burn</h4>
                 <div style={{width:'100%',height:220}} aria-label="Calories intake vs burn stacked area chart">
                   <ResponsiveContainer>
-                    <AreaChart data={filterData(caloriesData)}>
+                    <AreaChart data={calSeries || filterData(caloriesData)}>
                       <CartesianGrid stroke="#f3f4f6" />
                       <XAxis dataKey="day" />
                       <YAxis />

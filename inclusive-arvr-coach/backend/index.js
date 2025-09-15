@@ -15,6 +15,11 @@ app.use(express.json());
 // simple health check
 app.get('/health', (req, res) => res.json({ ok: true }));
 
+// root message to avoid "Cannot GET /"
+app.get('/', (req, res) => {
+  res.type('text/plain').send('Welldoc API is running. Health: /health');
+});
+
 // JWT secret (in production, use a proper secret)
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
@@ -313,6 +318,279 @@ app.post('/api/consent', async (req, res) => {
   }
 });
 
+// Wellyou Assistant (Gemini)
+app.post('/api/assistant/chat', async (req, res) => {
+  try {
+    const { prompt } = req.body || {};
+    if (!prompt) return res.status(400).json({ error: 'prompt_required' });
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'missing_gemini_api_key' });
+    const { GoogleGenerativeAI } = require('@google/generative-ai');
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const resp = await model.generateContent(prompt);
+    const text = resp?.response?.text?.() || 'No response.';
+    res.json({ text });
+  } catch (e) {
+    console.error('assistant error', e);
+    res.status(500).json({ error: 'assistant_failed' });
+  }
+});
+
 const port = process.env.PORT || 4000;
 app.listen(port, () => console.log(`API running on ${port}`));
+
+// Google Fit OAuth and Fitness endpoints
+const { google } = require('googleapis');
+
+const oauth2Client = new (require('google-auth-library').OAuth2Client)(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI
+);
+
+const FIT_SCOPES = [
+  'https://www.googleapis.com/auth/fitness.activity.read',
+  'https://www.googleapis.com/auth/fitness.heart_rate.read',
+  'https://www.googleapis.com/auth/fitness.body.read',
+  'https://www.googleapis.com/auth/fitness.sleep.read'
+];
+
+function extractToken(req) {
+  const q = req.query.token;
+  if (q) return q;
+  const authz = req.headers.authorization;
+  if (!authz) return null;
+  const parts = authz.split(' ');
+  return parts.length === 2 ? parts[1] : null;
+}
+
+app.get('/auth/google-fit', (req, res) => {
+  const stateToken = extractToken(req) || '';
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: FIT_SCOPES,
+    state: stateToken
+  });
+  res.redirect(url);
+});
+
+app.get('/auth/google-fit/callback', async (req, res) => {
+  try {
+    if (req.query.error) {
+      console.error('google-fit oauth error:', req.query.error, req.query.error_description);
+      return res.status(400).json({ error: 'oauth_error', details: req.query.error, description: req.query.error_description });
+    }
+    const { code } = req.query;
+    if (!code) return res.status(400).json({ error: 'missing_code' });
+    const { tokens } = await oauth2Client.getToken(code);
+    // If state contains a JWT, associate tokens to that user
+    const stateJwt = req.query.state;
+    if (stateJwt) {
+      try {
+        const decoded = jwt.verify(stateJwt, process.env.JWT_SECRET || 'your-secret-key');
+        const userId = decoded.userId;
+        await pool.query(
+          'UPDATE users SET gfit_access_token=$1, gfit_refresh_token=$2, gfit_expiry=$3 WHERE id=$4',
+          [tokens.access_token || null, tokens.refresh_token || null, tokens.expiry_date ? new Date(tokens.expiry_date) : null, userId]
+        );
+      } catch (e) {
+        console.error('failed to save tokens for user from state', e.message);
+      }
+    } else {
+      // fallback single-app memory
+      app.set('gfit_tokens', tokens);
+    }
+    const redirectUrl = process.env.GFIT_POST_CONNECT_URL || 'http://localhost:5173/fit-connected?status=ok';
+    res.redirect(302, redirectUrl);
+  } catch (e) {
+    const resp = e && e.response && e.response.data ? e.response.data : null;
+    console.error('google-fit callback error', e?.message, resp);
+    res.status(500).json({ error: 'google_fit_oauth_failed', message: e?.message, response: resp });
+  }
+});
+
+app.get('/auth/google-fit/status', async (req, res) => {
+  try {
+    const t = app.get('gfit_tokens');
+    let connected = !!t;
+    let hasRefresh = !!(t && t.refresh_token);
+    // Check DB for user-bound tokens
+    const token = extractToken(req);
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+        const userId = decoded.userId;
+        const r = await pool.query('SELECT gfit_refresh_token FROM users WHERE id=$1', [userId]);
+        if (r.rows.length) {
+          connected = connected || !!r.rows[0].gfit_refresh_token;
+          hasRefresh = hasRefresh || !!r.rows[0].gfit_refresh_token;
+        }
+      } catch (_) {}
+    }
+    res.json({ connected, hasRefreshToken: hasRefresh });
+  } catch {
+    res.json({ connected: false, hasRefreshToken: false });
+  }
+});
+
+async function getAuthorizedClient(userId) {
+  // Prefer user-bound tokens
+  if (userId) {
+    const r = await pool.query('SELECT gfit_access_token, gfit_refresh_token, gfit_expiry FROM users WHERE id=$1', [userId]);
+    if (r.rows.length && r.rows[0].gfit_refresh_token) {
+      oauth2Client.setCredentials({
+        access_token: r.rows[0].gfit_access_token || undefined,
+        refresh_token: r.rows[0].gfit_refresh_token || undefined,
+        expiry_date: r.rows[0].gfit_expiry ? new Date(r.rows[0].gfit_expiry).getTime() : undefined
+      });
+      return oauth2Client;
+    }
+  }
+  const tokens = app.get('gfit_tokens');
+  if (!tokens) throw new Error('not_connected');
+  oauth2Client.setCredentials(tokens);
+  return oauth2Client;
+}
+
+app.get('/api/fitness/steps', async (req, res) => {
+  try {
+    let userId = null;
+    const token = extractToken(req);
+    if (token) {
+      try { userId = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key').userId; } catch {}
+    }
+    const auth = await getAuthorizedClient(userId);
+    const fitness = google.fitness({ version: 'v1', auth });
+
+    // Align buckets to local midnight using client-provided tz offset (in minutes)
+    const tzOffsetMin = Number(req.query.tzOffsetMinutes || 0); // minutes offset from UTC
+    const nowUtc = Date.now();
+    const nowLocal = nowUtc + tzOffsetMin * 60 * 1000;
+    const endLocalMidnight = new Date(nowLocal);
+    endLocalMidnight.setHours(24, 0, 0, 0); // next local midnight
+    const endMs = endLocalMidnight.getTime() - tzOffsetMin * 60 * 1000; // back to UTC ms
+    const startMs = endMs - 7 * 24 * 60 * 60 * 1000;
+
+    const body = {
+      aggregateBy: [{
+        dataTypeName: 'com.google.step_count.delta',
+        dataSourceId: 'derived:com.google.step_count.delta:com.google.android.gms:merge_step_deltas'
+      }],
+      bucketByTime: { durationMillis: 24 * 60 * 60 * 1000 },
+      startTimeMillis: startMs,
+      endTimeMillis: endMs
+    };
+
+    const resp = await fitness.users.dataset.aggregate({ userId: 'me', requestBody: body });
+    const series = (resp.data.bucket || []).map(b => {
+      // Sum all points within the bucket (not just the first)
+      const points = b.dataset?.[0]?.point || [];
+      let total = 0;
+      for (const p of points) {
+        const val = p.value?.[0]?.intVal || 0;
+        total += val;
+      }
+      return { start: Number(b.startTimeMillis), steps: total };
+    });
+
+    res.json({ series });
+  } catch (e) {
+    const code = e.message === 'not_connected' ? 401 : 500;
+    res.status(code).json({ error: e.message });
+  }
+});
+
+app.get('/api/fitness/calories', async (req, res) => {
+  try {
+    let userId = null; const token = extractToken(req); if (token) { try { userId = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key').userId; } catch {} }
+    const auth = await getAuthorizedClient(userId);
+    const fitness = google.fitness({ version: 'v1', auth });
+    const endMs = Date.now();
+    const startMs = endMs - 7 * 24 * 60 * 60 * 1000;
+    const body = {
+      aggregateBy: [{ dataTypeName: 'com.google.calories.expended' }],
+      bucketByTime: { durationMillis: 24 * 60 * 60 * 1000 },
+      startTimeMillis: startMs,
+      endTimeMillis: endMs
+    };
+    const resp = await fitness.users.dataset.aggregate({ userId: 'me', requestBody: body });
+    const series = (resp.data.bucket || []).map(b => ({
+      start: Number(b.startTimeMillis),
+      calories: (b.dataset?.[0]?.point?.[0]?.value?.[0]?.fpVal) || 0
+    }));
+    res.json({ series });
+  } catch (e) {
+    const code = e.message === 'not_connected' ? 401 : 500;
+    res.status(code).json({ error: e.message });
+  }
+});
+
+app.get('/api/fitness/heartrate', async (req, res) => {
+  try {
+    let userId = null; const token = extractToken(req); if (token) { try { userId = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key').userId; } catch {} }
+    const auth = await getAuthorizedClient(userId);
+    const fitness = google.fitness({ version: 'v1', auth });
+    const endMs = Date.now();
+    const startMs = endMs - 7 * 24 * 60 * 60 * 1000;
+    const body = {
+      aggregateBy: [{ dataTypeName: 'com.google.heart_rate.bpm' }],
+      bucketByTime: { durationMillis: 24 * 60 * 60 * 1000 },
+      startTimeMillis: startMs,
+      endTimeMillis: endMs
+    };
+    const resp = await fitness.users.dataset.aggregate({ userId: 'me', requestBody: body });
+    const series = (resp.data.bucket || []).map(b => ({
+      start: Number(b.startTimeMillis),
+      bpm: (b.dataset?.[0]?.point?.[0]?.value?.[0]?.fpVal) || 0
+    }));
+    res.json({ series });
+  } catch (e) {
+    const code = e.message === 'not_connected' ? 401 : 500;
+    res.status(code).json({ error: e.message });
+  }
+});
+
+// Sleep breakdown (Deep/Light/REM) based on com.google.sleep.segment
+app.get('/api/fitness/sleep', async (req, res) => {
+  try {
+    let userId = null; const token = extractToken(req); if (token) { try { userId = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key').userId; } catch {} }
+    const auth = await getAuthorizedClient(userId);
+    const fitness = google.fitness({ version: 'v1', auth });
+    const endMs = Date.now();
+    const startMs = endMs - 7 * 24 * 60 * 60 * 1000;
+
+    // Sessions API can be used, but aggregate on segment type via dataset
+    const body = {
+      aggregateBy: [{ dataTypeName: 'com.google.sleep.segment' }],
+      bucketByTime: { durationMillis: 24 * 60 * 60 * 1000 },
+      startTimeMillis: startMs,
+      endTimeMillis: endMs
+    };
+    const resp = await fitness.users.dataset.aggregate({ userId: 'me', requestBody: body });
+
+    let totals = { Deep: 0, Light: 0, REM: 0 };
+    for (const b of (resp.data.bucket || [])) {
+      const points = b.dataset?.[0]?.point || [];
+      for (const p of points) {
+        const segType = p.value?.[0]?.intVal; // 1=Light, 2=Deep, 3=REM, 4=Awake
+        const duration = (Number(p.endTimeNanos) - Number(p.startTimeNanos)) / 1e9; // seconds
+        if (segType === 2) totals.Deep += duration;
+        else if (segType === 1) totals.Light += duration;
+        else if (segType === 3) totals.REM += duration;
+      }
+    }
+    const total = Math.max(1, totals.Deep + totals.Light + totals.REM);
+    const donut = [
+      { name: 'Deep', value: Math.round((totals.Deep / total) * 100) },
+      { name: 'Light', value: Math.round((totals.Light / total) * 100) },
+      { name: 'REM', value: Math.round((totals.REM / total) * 100) }
+    ];
+    res.json({ donut, seconds: totals });
+  } catch (e) {
+    const code = e.message === 'not_connected' ? 401 : 500;
+    res.status(code).json({ error: e.message });
+  }
+});
 

@@ -10,6 +10,11 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Google Fit token columns
+ALTER TABLE users ADD COLUMN IF NOT EXISTS gfit_access_token TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS gfit_refresh_token TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS gfit_expiry TIMESTAMPTZ;
+
 CREATE TABLE IF NOT EXISTS events (
   id BIGSERIAL PRIMARY KEY,
   user_id TEXT,

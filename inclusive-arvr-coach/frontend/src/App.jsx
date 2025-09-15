@@ -9,6 +9,7 @@ import Dashboard from "./pages/Dashboard.jsx";
 import Profile from "./pages/Profile.jsx";
 import UploadPage from "./pages/Upload.jsx";
 import UserMetricsProfile from "./pages/UserMetricsProfile.jsx";
+import FitConnected from "./pages/FitConnected.jsx";
 import { getUser } from "./lib/userStore.js";
 import "./App.css";
 
@@ -40,8 +41,9 @@ export default function App() {
     <div className="app" style={{ minHeight: '100vh', backgroundColor: '#f9fafb' }}>
       {!hideNav && <NavBar />}
       <Routes>
-        <Route path="/" element={<Landing />} />
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/auth" element={<Auth />} />
+        <Route path="/fit-connected" element={<FitConnected />} />
         
         <Route
           path="/get-started"
@@ -95,7 +97,7 @@ export default function App() {
         />
 
         {/* Fallback */}
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
       {!hideNav && <WellyouAssistant />}
     </div>
