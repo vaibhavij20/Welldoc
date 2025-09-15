@@ -2,11 +2,19 @@
 @import './styles/Dashboard.css';
 @import './styles/HealthComponents.css';
 
+#root, html, body {
+  width: 100%;
+  overflow-x: hidden;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 #root {
   max-width: 1280px;
   margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+  padding: 0 16px;
 }
 
 .logo {
@@ -43,4 +51,30 @@
 
 .read-the-docs {
   color: #888;
+}
+
+/* Generic container used across topbar and pages */
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+/* Top navigation bar alignment */
+.navbar {
+  width: 100%;
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+/* Logo zoom-in on page load */
+.brand-logo {
+  transform: scale(0.9);
+  animation: brand-zoom 400ms ease-out forwards;
+}
+
+@keyframes brand-zoom {
+  0% { transform: scale(0.9); }
+  100% { transform: scale(1); }
 }

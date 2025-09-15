@@ -1,11 +1,14 @@
 // src/App.jsx
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import NavBar from "./components/NavBar.jsx";
+import WellyouAssistant from "./components/WellyouAssistant.jsx";
 import Landing from "./pages/Landing.jsx";
 import Auth from "./pages/Auth.jsx";
 import GetStarted from "./pages/GetStarted.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import Profile from "./pages/Profile.jsx";
+import UploadPage from "./pages/Upload.jsx";
+import UserMetricsProfile from "./pages/UserMetricsProfile.jsx";
 import { getUser } from "./lib/userStore.js";
 import "./App.css";
 
@@ -19,8 +22,7 @@ function Protected({ children }) {
 
 // NeedsCategory wrapper
 function NeedsCategory({ children }) {
-  const user = getUser();
-  if (user && !user.category) return <Navigate to="/get-started" replace />;
+  // Category gating disabled to streamline onboarding without disability selection
   return children;
 }
 
@@ -62,6 +64,28 @@ export default function App() {
         />
 
         <Route
+          path="/upload"
+          element={
+            <Protected>
+              <NeedsCategory>
+                <UploadPage />
+              </NeedsCategory>
+            </Protected>
+          }
+        />
+
+        <Route
+          path="/metrics-profile"
+          element={
+            <Protected>
+              <NeedsCategory>
+                <UserMetricsProfile />
+              </NeedsCategory>
+            </Protected>
+          }
+        />
+
+        <Route
           path="/profile"
           element={
             <Protected>
@@ -73,6 +97,7 @@ export default function App() {
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      {!hideNav && <WellyouAssistant />}
     </div>
   );
 }
