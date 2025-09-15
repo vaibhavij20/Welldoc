@@ -1,3 +1,7 @@
+/* Import Dashboard Styles */
+@import './styles/Dashboard.css';
+@import './styles/HealthComponents.css';
+
 #root {
   max-width: 1280px;
   margin: 0 auto;
